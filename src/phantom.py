@@ -48,6 +48,15 @@ class EllipsoidPhantom(Phantom):
             d_thickness = self.Tmax * np.sqrt(Z2)
             self.d_thickness = d_thickness
         return self.d_thickness
+
+    def get_delta(self):
+        return 1.043e-6
+
+    def get_beta(self):
+        return 3.553e-10
+
+    def get_gamma(self):
+        return self.get_beta()/self.get_delta()
     
     def get_delta_beta(self, energy):
         return 1.043e-6, 3.553e-10

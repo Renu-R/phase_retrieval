@@ -1,6 +1,7 @@
 import numpy as np
 from scipy.signal import convolve2d
 from consts import h,c,e
+from scipy.ndimage import convolve
 
 def energy_to_wavelen(energy):
     return h*c/(energy*e)
@@ -70,14 +71,14 @@ def free_space_propagate(in_wave, exit_wave, R):
     ----------
     in_wave : Wave
         Contains information about the incident wave geometry.
-    exit_wave : 2D cupy array
+    exit_wave : 2D numpy array
         The complex plane wave after it has been modulated through a phantom.
     prop_dist : float
         Distance from the exit_wave plane to the detector plane.
 
     Returns
     -------
-    d_fsp_wave : 2D cupy array
+    d_fsp_wave : 2D numpy array
         Complex plane wave after FSP.
     
     """
@@ -92,84 +93,87 @@ def free_space_propagate(in_wave, exit_wave, R):
     d_fsp_wave =np.fft.ifft2(np.fft.ifftshift(exit_wave_fft*H))
     return d_fsp_wave
 
-def lorentzian2D(x, y, fwhm, normalize=True):
+
+def detect_wave_1(image: np.ndarray, noise_level: float = 5e-4) -> np.ndarray:
     """
-    Generate a 2D Lorentzian kernel.
-    x, y : 1D cupy array
-        Grid coordinates [arbitrary length]
-    fwhm : float
-        Full-width at half-max of the Lorentzian (units must match x,y)
+    Simulates an X-ray image detector by adding Lorentzian noise to the input image.
+
+    Parameters:
+        image (np.ndarray): Input 2D array representing the image.
+        noise_level (float): Scale of Lorentzian noise to add (relative to image intensity range).
+
+    Returns:
+        np.ndarray: The detected image with added noise.
     """
-    gamma = fwhm/2
-    X, Y = np.meshgrid(x, y)
-    kernel = gamma / (2 * np.pi * (X**2 + Y**2 + gamma**2)**1.5)
-    if normalize:
-        kernel = kernel / np.sum(kernel)
+    if not isinstance(image, np.ndarray):
+        raise TypeError("Input image must be a NumPy array.")
+
+    if image.ndim != 2:
+        raise ValueError("Input image must be a 2D array.")
+
+    # Normalize the image to [0, 1] for consistent noise application
+    image_min, image_max = image.min(), image.max()
+    normalized_image = (image - image_min) / (image_max - image_min)
+
+    # Add Lorentzian noise: Generate noise from the Cauchy distribution
+    noise = np.random.standard_cauchy(normalized_image.shape) * noise_level
+    noisy_image = normalized_image + noise
+
+    # Clip values to ensure valid intensity range [0, 1]
+    noisy_image = np.clip(noisy_image, 0, 1)
+
+    # Scale back to the original intensity range
+    detected_image = noisy_image * (image_max - image_min) + image_min
+
+    return detected_image
+
+def lorentzian_kernel(fwhm: float, size: int = 3) -> np.ndarray:
+    x = np.linspace(-size // 2, size // 2, size)
+    y = np.linspace(-size // 2, size // 2, size)
+    x, y = np.meshgrid(x, y)
+    r = np.sqrt(x**2 + y**2)
+    gamma = fwhm / 2
+    kernel = 1 / (1 + (r / gamma)**2)
+    kernel /= np.sum(kernel)
     return kernel
 
-def block_mean_2d(arr, Nblock):
+def detect_wave(image: np.ndarray, blur: float = 1e-6, noise: float = 10e-4) -> np.ndarray:
     """
-    Computes the block mean over a 2D array `arr`
-    in sublocks of size Nblock x Nblock.
-    If an axis size of arr is not an integer multiple 
-    of Nblock, then zero padding is added at the end.
-
-    This will cause image artifacts when fringes are too close
-    relative to pixel size.
-    """
-    Ny, Nx = arr.shape
-    padx, pady = 0, 0
-    if Nx%Nblock != 0:
-        padx = Nblock - Nx%Nblock
-    if Ny%Nblock != 0:
-        pady = Nblock - Ny%Nblock
-    d_arr = np.array(arr)
-    d_arr_pad = np.pad(d_arr, [(0, pady), (0, padx)])
-    Ny, Nx = d_arr_pad.shape
-    d_block_mean = d_arr_pad.reshape(Ny//Nblock, Nblock, Nx//Nblock, Nblock).mean(axis=(1,-1))
-    return d_block_mean
-
-def detect_wave(in_wave, wave, upsample_multiple, blur_fwhm=0):
-    """
-    Detect a complex plane wave by downsampling the array to the detector thickness
-    with a 2D block mean (integer multiples of the pixel width only!) and
-    possibly applying a Lorentzian blur.
+    Simulates an X-ray image detector by adding Lorentzian noise to the input image.
     
-    TODO : add noise.
-    
-    Parameters
-    ----------
-    in_wave : Wave
-        Contains information about the initial wave geometry.
-    wave : 2D cupy array
-        The complex plane wave incident on the detector.
-    upsample_multiple : int
-        Number of pixels over which to take the block mean for downsampling.
-    blur_fwhm : float
-        Full-width at half-max of the Lorentzian kernel, which defines the
-        point-spread-function of the detector.
-        If blur_fwhm == 0, no blurring is applied (ideal).
-
-    Returns
-    -------
-    d_detected_wave : 2D cupy array
-        Real detected plane wave.
+    Parameters:
+        image (np.ndarray): Input 2D array representing the image.
+        pixel_size (float): Size of the pixels (in some units, e.g., microns or millimeters).
+        fwhm (float): Full Width at Half Maximum of the Lorentzian noise in the same units as pixel_size.
+        
+    Returns:
+        np.ndarray: The detected image with added Lorentzian noise.
     """
-    print(blur_fwhm) 
-    if blur_fwhm > 0:
-        # choose a sufficiently large kernel
-        N_kernel = int(2 * blur_fwhm / in_wave.dx) + 1
-        if (N_kernel > 2*in_wave.Nx + 1):
-            N_kernel = 2*in_wave.Nx + 1  # crop if too large
-        if (N_kernel%2 == 0):
-            N_kernel -= 1
-        # apply blur
-        FOV_kern_x, FOV_kern_y = N_kernel*in_wave.dx, N_kernel*in_wave.dy
-        d_x = np.linspace(-FOV_kern_x/2, FOV_kern_x/2, N_kernel)
-        d_y = np.linspace(-FOV_kern_y/2, FOV_kern_y/2, N_kernel)
-        d_lorentzian2d = lorentzian2D(d_x, d_y, blur_fwhm)
-        d_wave_blurred = convolve2d(np.abs(wave), d_lorentzian2d, mode='same')
-        d_detected_wave = block_mean_2d(d_wave_blurred, upsample_multiple)
-    else:
-        d_detected_wave = block_mean_2d(np.abs(wave), upsample_multiple)
-    return d_detected_wave
+    if not isinstance(image, np.ndarray):
+        raise TypeError("Input image must be a NumPy array.")
+
+    if image.ndim != 2:
+        raise ValueError("Input image must be a 2D array.")
+
+    kernel = lorentzian_kernel(blur)
+    blurred_image = convolve2d(image, kernel, mode='same', boundary='wrap')
+    #blurred_image = image
+
+    # Calculate the scale parameter (gamma) from the FWHM
+    gamma = noise / 2
+    
+    # Normalize the image to [0, 1] for consistent noise application
+    image_min, image_max = image.min(), image.max()
+    normalized_image = (blurred_image - image_min) / (image_max - image_min)
+
+    # Add Lorentzian noise: Generate noise from the Cauchy distribution
+    noise = np.random.standard_cauchy(normalized_image.shape) * gamma
+    noisy_image = normalized_image + noise
+
+    # Clip values to ensure valid intensity range [0, 1]
+    noisy_image = np.clip(noisy_image, 0, 1)
+
+    # Scale back to the original intensity range
+    detected_image = noisy_image * (image_max - image_min) + image_min
+
+    return detected_image
